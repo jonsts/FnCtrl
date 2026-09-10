@@ -40,6 +40,8 @@ class FnCtrl {
     static extern uint GetRawInputDeviceInfo(IntPtr h, uint cmd, IntPtr data, ref uint size);
     [DllImport("user32.dll")] static extern uint GetRawInputDeviceList(IntPtr p, ref uint n, uint cb);
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int cb);
+    [DllImport("user32.dll")] static extern uint GetRegisteredRawInputDevices(IntPtr d, ref uint n, uint cb);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     [DllImport("kernel32.dll")] static extern bool AllocConsole();
     [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
 
@@ -197,6 +199,35 @@ class FnCtrl {
         Console.SetOut(w);
     }
 
+    static RAWINPUTDEVICE[] registrations;
+    static System.Windows.Forms.Timer watchdog;
+
+    static bool Register() {
+        bool ok = RegisterRawInputDevices(registrations, (uint)registrations.Length,
+                                          (uint)Marshal.SizeOf(typeof(RAWINPUTDEVICE)));
+        if (!ok) Trace("RegisterRawInputDevices failed: error {0}", Marshal.GetLastWin32Error());
+        return ok;
+    }
+
+    // A Raw Input registration can only be lost with the window it is attached
+    // to, so if the count ever drops we want to know - and recover. Both halves
+    // are logged, so a recurrence of the silent-stop bug leaves evidence.
+    static void CheckRegistration(object sender, EventArgs e) {
+        uint n = 0;
+        GetRegisteredRawInputDevices(IntPtr.Zero, ref n, (uint)Marshal.SizeOf(typeof(RAWINPUTDEVICE)));
+        bool windowAlive = sink != null && IsWindow(sink.Handle);
+        if (n >= registrations.Length && windowAlive) return;
+
+        Trace("LOST INPUT: registrations={0} (expected {1}), window alive={2} - recovering",
+              n, registrations.Length, windowAlive);
+        if (!windowAlive) {
+            sink = new Sink();
+            sink.CreateHandle(new CreateParams());
+            for (int i = 0; i < registrations.Length; i++) registrations[i].hwndTarget = sink.Handle;
+        }
+        Trace("recovery re-register: {0}", Register());
+    }
+
     static bool IsElevated() {
         try {
             var id = System.Security.Principal.WindowsIdentity.GetCurrent();
@@ -287,14 +318,27 @@ class FnCtrl {
 
             // 0x0C/0x01 consumer control carries Fn over Bluetooth;
             // 0xFF01/0x03 is Apple's vendor top-case page, used over USB.
-            var regs = new RAWINPUTDEVICE[] {
+            registrations = new RAWINPUTDEVICE[] {
                 new RAWINPUTDEVICE { usUsagePage = 0x000C, usUsage = 0x01, dwFlags = RIDEV_INPUTSINK | RIDEV_DEVNOTIFY, hwndTarget = sink.Handle },
                 new RAWINPUTDEVICE { usUsagePage = 0xFF01, usUsage = 0x03, dwFlags = RIDEV_INPUTSINK | RIDEV_DEVNOTIFY, hwndTarget = sink.Handle },
             };
-            if (!RegisterRawInputDevices(regs, (uint)regs.Length, (uint)Marshal.SizeOf(typeof(RAWINPUTDEVICE)))) {
+            if (!Register()) {
                 string msg = "Could not register for raw input: error " + Marshal.GetLastWin32Error();
                 if (probe) Console.WriteLine(msg); else MessageBox.Show(msg, "FnCtrl");
                 return;
+            }
+
+            if (!probe) {
+                // Resuming from sleep is the prime suspect for the silent stop,
+                // so drop any held key and prove the registration still stands.
+                Microsoft.Win32.SystemEvents.PowerModeChanged += delegate(object s, Microsoft.Win32.PowerModeChangedEventArgs e) {
+                    Trace("power mode: {0}", e.Mode);
+                    if (e.Mode == Microsoft.Win32.PowerModes.Resume) { ReleaseAll(); CheckRegistration(null, null); }
+                };
+                watchdog = new System.Windows.Forms.Timer();
+                watchdog.Interval = 60000;
+                watchdog.Tick += CheckRegistration;
+                watchdog.Start();
             }
 
             if (probe) {
