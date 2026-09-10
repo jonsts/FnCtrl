@@ -81,6 +81,18 @@ Useful virtual-key codes: `A2` Left Ctrl · `A0` Left Shift · `A4` Left Alt · 
 - **Fn combinations become Ctrl combinations.** Fn+F1 becomes Ctrl+F1, and so on.
 - **Not tested beyond** a Bluetooth Magic Keyboard (A1644, VID `05AC` PID `0256`) on Windows 11. Probe output from other models is welcome.
 
+## Known issue: it can go quiet
+
+On at least one machine the program kept running — tray icon healthy, process alive — but stopped acting on reports until it was restarted. The cause is not yet understood. Ruled out so far: the keyboard itself (a `--probe` run at the same moment received reports normally), a collected window handle, a stuck modifier, and the process being on a different session or desktop.
+
+If it happens to you, run with tracing and attach the log to an issue:
+
+```powershell
+.\install.ps1 -ExtraArgs '--log','C:\path\to\trace.log'
+```
+
+Every HID report and every synthesised key press is logged with a timestamp, which distinguishes "reports stopped arriving" from "reports arrived but the key was not sent".
+
 ## Build only
 
 ```powershell

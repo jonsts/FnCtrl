@@ -60,6 +60,12 @@ class FnCtrl {
     static readonly Dictionary<IntPtr, string> known = new Dictionary<IntPtr, string>();
     static NotifyIcon tray;
 
+    // Must stay reachable for the lifetime of the process: NativeWindow's
+    // finalizer destroys the window handle, and the Raw Input registration
+    // lives on that handle. As a local it would be collectable the moment the
+    // message loop started, silently ending input delivery.
+    static Sink sink;
+
     class Sink : NativeWindow {
         protected override void WndProc(ref Message m) {
             if (m.Msg == WM_INPUT) OnInput(m.LParam);
@@ -133,6 +139,7 @@ class FnCtrl {
                     Console.WriteLine("{0}  |  report: {1}", who, sb.ToString().Trim());
                     continue;
                 }
+                Trace("report {0:X2} {1:X2} from {2}", b[d], b[d + 1], who);
                 foreach (Mapping m in maps) {
                     if (b[d] != m.ReportId || m.Byte >= sizeHid) continue;
                     if ((b[d + m.Byte] & m.Mask) != 0) Press(m); else Release(m);
@@ -148,10 +155,11 @@ class FnCtrl {
         inputs[0].ki.wScan = m.Scan;
         inputs[0].ki.dwFlags = flags;
         inputs[0].ki.dwExtraInfo = (IntPtr)0x464E4331; // "FNC1" - marks our synthetic events
-        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+        uint sent = SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+        if (sent != 1) Trace("SendInput FAILED for {0}: error {1}", m.Name, Marshal.GetLastWin32Error());
     }
-    static void Press(Mapping m)   { if (!m.Held) { m.Held = true;  Send(m, 0); } }
-    static void Release(Mapping m) { if (m.Held)  { m.Held = false; Send(m, KEYEVENTF_KEYUP); } }
+    static void Press(Mapping m)   { if (!m.Held) { m.Held = true;  Send(m, 0); Trace("{0} down -> vk 0x{1:X2}", m.Name, m.Vk); } }
+    static void Release(Mapping m) { if (m.Held)  { m.Held = false; Send(m, KEYEVENTF_KEYUP); Trace("{0} up", m.Name); } }
     static void ReleaseAll()       { foreach (Mapping m in maps) Release(m); }
 
     static void ListDevices() {
@@ -187,6 +195,20 @@ class FnCtrl {
         if (!AttachConsole(-1)) AllocConsole();
         var w = new StreamWriter(Console.OpenStandardOutput()); w.AutoFlush = true;
         Console.SetOut(w);
+    }
+
+    static bool IsElevated() {
+        try {
+            var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+            return new System.Security.Principal.WindowsPrincipal(id).IsInRole(
+                System.Security.Principal.WindowsBuiltInRole.Administrator);
+        } catch { return false; }
+    }
+
+    // Diagnostics: active whenever --log is given, in probe mode or not.
+    static void Trace(string fmt, params object[] a) {
+        if (logPath == null) return;
+        Console.WriteLine("{0:HH:mm:ss.fff}  {1}", DateTime.Now, string.Format(fmt, a));
     }
 
     static ushort Hex(string s) {
@@ -255,9 +277,10 @@ class FnCtrl {
         using (var mutex = new Mutex(true, "FnCtrl_SingleInstance_9f21", out created)) {
             if (!created && !probe) return; // already running
 
-            if (probe) OpenConsole();
+            if (probe || logPath != null) OpenConsole();
+            Trace("starting; elevated={0}; mappings: {1}", IsElevated(), string.Join(" | ", maps.ConvertAll(x => x.ToString()).ToArray()));
 
-            var sink = new Sink();
+            sink = new Sink();
             sink.CreateHandle(new CreateParams());
 
             if (probe) ListDevices();
@@ -293,6 +316,7 @@ class FnCtrl {
 
             Application.ApplicationExit += delegate { ReleaseAll(); if (tray != null) tray.Visible = false; };
             Application.Run(new ApplicationContext());
+            GC.KeepAlive(sink);
             GC.KeepAlive(mutex);
         }
     }
