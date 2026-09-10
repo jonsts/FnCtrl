@@ -212,11 +212,19 @@ class FnCtrl {
     // A Raw Input registration can only be lost with the window it is attached
     // to, so if the count ever drops we want to know - and recover. Both halves
     // are logged, so a recurrence of the silent-stop bug leaves evidence.
+    static int ticks;
+
     static void CheckRegistration(object sender, EventArgs e) {
         uint n = 0;
         GetRegisteredRawInputDevices(IntPtr.Zero, ref n, (uint)Marshal.SizeOf(typeof(RAWINPUTDEVICE)));
         bool windowAlive = sink != null && IsWindow(sink.Handle);
-        if (n >= registrations.Length && windowAlive) return;
+        if (n >= registrations.Length && windowAlive) {
+            // A quarter-hourly heartbeat, so that silence in the log means
+            // "nothing went wrong" rather than "the watchdog itself died".
+            // It also proves the message loop is still pumping if reports stop.
+            if (++ticks % 15 == 0) Trace("watchdog ok: registrations={0}", n);
+            return;
+        }
 
         Trace("LOST INPUT: registrations={0} (expected {1}), window alive={2} - recovering",
               n, registrations.Length, windowAlive);
